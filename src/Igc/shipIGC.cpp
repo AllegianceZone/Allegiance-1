@@ -196,6 +196,7 @@ HRESULT     CshipIGC::Initialize(ImissionIGC* pMission, Time now, const void* da
     m_wingmanBehaviour = c_wbbmUseMissiles | c_wbbmRunAt60Hull;
 	m_repair = 0; //Xynth amount of nanning performed by ship
 	m_achievementMask = 0;
+	m_hasBeenSpotted = false; //Xynth if this ship has been spotted
     
 	return S_OK;
 }
@@ -2315,18 +2316,23 @@ void    CshipIGC::PlotShipMove(Time          timeStop)
         {
             m_dtTimeBetweenComplaints = c_dtTimeBetweenComplaints;
 
-            if (m_pilotType == c_ptWingman)  { // || (m_pilotType == c_ptCheatPlayer && m_commandIDs[c_cmdPlan] != c_cidGoto)) {
+            if ((m_pilotType == c_ptWingman || m_pilotType == c_ptCheatPlayer) && m_mountedWeapons[0] != NULL)  { // || (m_pilotType == c_ptCheatPlayer && m_commandIDs[c_cmdPlan] != c_cidGoto)) {
                 if (m_commandTargets[c_cmdPlan]->GetCluster() == GetCluster())
                 {
                     if (m_commandIDs[c_cmdPlan] == c_cidAttack)
                     {
                         //In the same cluster as the target ... we dodge, turn to face the aim point and fire if close enough
                         float fShootSkill = 0.75f;
-                        const float fTurnSkill = 0.75f;
+                        float fTurnSkill = 0.75f;
                         const float openFireDistPercentage = 0.95f;
                         int     state = 0;
                         bool    bDodge = Dodge(this, m_commandTargets[c_cmdPlan], &state);
                         bool    criticalMovement = false;
+
+						if (m_pilotType == c_ptCheatPlayer) {
+							fShootSkill = m_fShootSkill;
+							fTurnSkill = m_fTurnSkill;
+						}
 
                         if (m_checkCooldown)
                             m_checkCooldown--;
@@ -3953,14 +3959,15 @@ void    CshipIGC::ResetWaypoint(void)
             {
                 case OT_ship:
                 {
-                    o = (m_commandIDs[c_cmdPlan] == c_cidPickup)
+                    if ((GetHullType()->HasCapability(c_habmLandOnCarrier)) &&
+                        ((IshipIGC*)m_commandTargets[c_cmdPlan])->GetHullType()->HasCapability(c_habmCarrier))
+                    {
+                        o = (m_commandIDs[c_cmdPlan] == c_cidGoto) ? Waypoint::c_oEnter : Waypoint::c_oGoto;
+                    }
+                    else 
+                        o = (m_commandIDs[c_cmdPlan] == c_cidPickup)
                         ? Waypoint::c_oEnter
                         : Waypoint::c_oGoto;
-                    if ((GetHullType()->GetCapabilities() & c_habmLandOnCarrier) &&
-                        (((IshipIGC*)m_commandTargets[c_cmdPlan])->GetHullType()->GetCapabilities() & c_habmCarrier))
-                    {
-                        o = Waypoint::c_oEnter;
-                    }
                 }
                 break;
 
@@ -4555,7 +4562,10 @@ const char*          MyHullType::GetIconName(void) const
 
 HullAbilityBitMask   MyHullType::GetCapabilities(void) const
 {
-    return m_pHullData->habmCapabilities;
+	if (m_pHullData != nullptr)
+		return m_pHullData->habmCapabilities;
+	else
+		return 0;
 }
 bool                 MyHullType::HasCapability(HullAbilityBitMask habm) const
 {

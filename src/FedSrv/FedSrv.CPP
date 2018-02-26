@@ -923,12 +923,22 @@ void GotLogonDetails(CQLogonStats * pquery)
     pqd->fCanCheat = true;
     #endif
 
+	// If CDKey matches Pig CDKey then they can always cheat
+	if (strcmp(pqd->szCDKey, g.szBotAuthenticationGuid) == 0) {
+		pqd->fCanCheat = true;  
+	}
+
     dataship.pilotType = pqd->fCanCheat ? c_ptCheatPlayer : c_ptPlayer;
     dataship.abmOrders = 0;
     dataship.baseObjectID = NA;
     lstrcpy(dataship.name, pqd->szReason);
     TRef<IshipIGC> pship = (IshipIGC *) g.trekCore->CreateObject(g.timeNow,
                           OT_ship, &dataship, sizeof(dataship));
+
+	// If CDKey matches Pig CDKey then give them super powers
+	if (strcmp(pqd->szCDKey, g.szBotAuthenticationGuid) == 0) {
+		pship->SetWingmanBehaviour(c_wbbmStrafe | c_wbbmUseMissiles | c_wbbmUseMines | c_wbbmRunAt30Hull | c_wbbmInRangeAggressive);
+	}
 
 	// BT - STEAM
 	CSteamID steamID;
@@ -5985,7 +5995,10 @@ HRESULT FedSrvSiteBase::OnAppMessage(FedMessaging * pthis, CFMConnection & cnxnF
 		// is correct, then, we are going to make an async call to the Lobby to get the player's rank, then the return from that call will finally trigger the 
 		// SQL Done state on the pQuery and let the user login.
 
-		if (g.bUseSteamAuthentication == true)
+		if (g.bUseSteamAuthentication == true 
+			// If the user's CDKey matches the botAuthenticationGUID from the registry, then this login is a bot, so we can bypass all 
+			// the steam security.
+			&& strcmp(pqd->szCDKey, g.szBotAuthenticationGuid) != 0)
 		{
 			memcpy(pqd->steamAuthTicket, pfmLogon->steamAuthTicket, pfmLogon->steamAuthTicketLength);
 			pqd->steamAuthTicketLength = pfmLogon->steamAuthTicketLength;
@@ -6709,9 +6722,27 @@ HRESULT FedSrvSiteBase::OnAppMessage(FedMessaging * pthis, CFMConnection & cnxnF
       if (NA == iSide)
         iSide = pfsMission->PickNewSide(pfsPlayer, false, 0);
 
-      IsideIGC* psideReq = pMission->GetSide(iSide);
-      if (psideReq)
-        pfsMission->RequestPosition(pfsPlayer, psideReq, false);
+	  IsideIGC* psideReq = pMission->GetSide(iSide);
+
+	  if (pMission->GetMissionParams()->bDrones == true && iSide == 0 && strcmp(pfsPlayer->GetCDKey(), g.szBotAuthenticationGuid) != 0)
+	  {
+		  //deny the request: Only bots are allowed on this team.
+		  BEGIN_PFM_CREATE(g.fm, pfmDelPosReq, CS, DELPOSITIONREQ)
+			  END_PFM_CREATE
+			  pfmDelPosReq->shipID = pfsPlayer->GetShipID();
+		  pfmDelPosReq->iSide = iSide;
+
+		  pfmDelPosReq->reason = DPR_BotsOnTeam0Only;
+
+		  g.fm.SendMessages(pfsPlayer->GetConnection(), FM_GUARANTEED, FM_FLUSH);
+		  break;
+	  }
+
+      
+	  if (psideReq)
+	  {
+		  pfsMission->RequestPosition(pfsPlayer, psideReq, false);
+	  }
       else
       {
         //deny the request: side no longer exists
@@ -7613,12 +7644,16 @@ HRESULT FedSrvSiteBase::OnAppMessage(FedMessaging * pthis, CFMConnection & cnxnF
     {
       // the player better be the mission owner for this mission
       TrapHackBoot(pfsMission);
-      TrapHackBoot(pfsMission->GetOwner() == pfsPlayer);
+
+	  // Let bots start the game even if they are not the mission owner.
+	  if (strcmp(pfsPlayer->GetCDKey(), g.szBotAuthenticationGuid) != 0)
+		TrapHackBoot(pfsMission->GetOwner() == pfsPlayer);
 
       // if the mission has not started yet but is ready to start, start the mission
       if (pfsMission->GetStage() == STAGE_NOTSTARTED)
       {
-        if (pfsMission->FAllReady())
+		  // If all sides are ready, or if the game starter is a bot, then start the game. 
+        if (pfsMission->FAllReady() || strcmp(pfsPlayer->GetCDKey(), g.szBotAuthenticationGuid) == 0) 
         {
             // start the countdown
             pfsMission->StartCountdown(c_fMissionBriefingCountdown);
@@ -9051,10 +9086,24 @@ void StartDefaultGames()
        	// look for a core/map for Map#
 		// -KGJV : should we lock game settings when custom map specified. If so need 'GameParameters#' too ?
 		// removed map# for now
+		// BT - Readded for bots
 		ZString strMap;
-		//wsprintf(cbValueName, "Map%d", iGame);
-		//LoadRegString(hKey, cbValueName, strMap);
-		//strncpy(mp.szCustomMapFile, strMap, c_cbFileName);
+		wsprintf(cbValueName, "Map%d", iGame);
+		LoadRegString(hKey, cbValueName, strMap);
+
+		if (strlen(strMap) > 0 && stricmp("botbrawl", strMap) == 0)
+		{
+			mp.mmMapType = c_mmBrawl;
+			mp.nGoalTeamKills = 100;
+			mp.bAllowDevelopments = false;
+			mp.bObjectModelCreated = true;
+			mp.bClubGame = true;
+			mp.iGoalConquestPercentage = 0;
+			mp.bDrones = true;
+			mp.iMaxImbalance = 0x7fff; // Imalance = N/A
+		}
+
+		
 
         // KGJV #92 - LockOpen# option  per game
         // dword value - 1 to lockopen
@@ -9511,6 +9560,23 @@ void LoadSettings()
 		DWORD cbApiKey = sizeof(g.szApiKey);
 		RegQueryValueExA(hKey, "ApiKey", NULL, &dwType, (unsigned char*)g.szApiKey, &cbApiKey);
 
+		// BT - STEAM
+		g.szBotAuthenticationGuid[0] = '\0';
+		DWORD cbBotAuthenticationGuid = sizeof(g.szBotAuthenticationGuid);
+		RegQueryValueExA(hKey, "BotAuthenticationGuid", NULL, &dwType, (unsigned char*)g.szBotAuthenticationGuid, &cbBotAuthenticationGuid);
+
+		// If no BotAuthenticationGuid was defined, then set this to some random GUID to ensure that no one guesses the bot auth GUID.
+		if (strlen(g.szBotAuthenticationGuid) == 0)
+		{
+			UUID newId;
+			UuidCreate(&newId);
+			CHAR* szUuid = NULL;
+			::UuidToString(&newId, (RPC_CSTR*)&szUuid);
+			char pork[1024];
+			strcpy(g.szBotAuthenticationGuid, szUuid);
+			::RpcStringFree((RPC_CSTR*)&szUuid);
+			szUuid = NULL;
+		}
 
 		/* pkk May 6th: Disabled bandwidth patch
 		// w0dk4 Bandwidth Patch
@@ -10890,7 +10956,7 @@ class ThingSiteImpl : public ThingSite
 												ObjectID probeID = s->GetObjectID();
 												ImodelIGC * pProbeModel = s->GetMission()->GetModel(OT_probe, probeID);
 												IprobeIGC * pProbe = (IprobeIGC*)pProbeModel;
-												if (pProbe)
+												if (pProbe && !pSpottedShip->beenSpotted())
 												{
 													IshipIGC* pProbingShip = pProbe->GetProbeLauncherShip();
 													if (pProbingShip)
@@ -10911,6 +10977,15 @@ class ThingSiteImpl : public ThingSite
 												}
 											}
 										}
+										if (pSpottedShip) //mark ship as novelly spotted
+											pSpottedShip->SpotShip();
+									}
+									else if (OT_probe && pmodel->GetSide() != nullptr) //wasn't a probe but still want to mark it as a novel spot
+									{
+										ObjectID spottedID = pmodel->GetObjectID();
+										IshipIGC* pSpottedShip = pmodel->GetSide()->GetShip(spottedID);
+										if(pSpottedShip != nullptr)
+											pSpottedShip->SpotShip();
 									}
 
 									
@@ -10923,6 +10998,7 @@ class ThingSiteImpl : public ThingSite
 										}
 										sv.fVisible(true);
 										sv.CurrentEyed(true); //Xynth #100 7/2010
+
 									}
 									
 									if (pside->GetMission()->GetMissionParams()->bAllowAlliedViz) //ALLY should be SCAN Imago 7/11/09
@@ -12753,12 +12829,12 @@ void FedSrvSiteBase::AlliedRearm(IshipIGC* pship, bool bLaunch) { //Imago 8/10/0
 
 bool FedSrvSiteBase::LandOnCarrierEvent(IshipIGC* pshipCarrier, IshipIGC* pship, float tCollision)
 {
-    CFSPlayer*  pfsPlayer = ((CFSShip*)(pship->GetPrivateData()))->GetPlayer();
+    CFSShip* pfsShip = (CFSShip*)pship->GetPrivateData();
 
     ImissionIGC*    pMission = pship->GetMission();
     TechTreeBitMask  ttbm = pship->GetSide()->GetDevelopmentTechs() | pship->GetSide()->GetBuildingTechs();
 
-    //Now ... go through the players ship and restore the expendables that are
+    //Now ... go through the ship and restore the expendables that are
     //free and partially gone
     {
         //refill parts backwards so that newly added parts will not be revisited
@@ -12773,83 +12849,52 @@ bool FedSrvSiteBase::LandOnCarrierEvent(IshipIGC* pshipCarrier, IshipIGC* pship,
         }
     }
 
-    //Copy the list of desired parts
-    IpartTypeIGC*   ptDesired[c_maxCargo + 3];      //Must be kept sync'd with
-    memcpy(ptDesired, pfsPlayer->GetDesiredLoadout(), sizeof(ptDesired));
+    if (pfsShip->IsPlayer()) {
+        //Copy the list of desired parts
+        IpartTypeIGC*   ptDesired[c_maxCargo + 3];      //Must be kept sync'd with
+        memcpy(ptDesired, pfsShip->GetPlayer()->GetDesiredLoadout(), sizeof(ptDesired));
 
-    //Go through and fill any holes with the desired parts
-    {
-        ErasePart(pship, ET_Magazine, 0, ptDesired);
-        ErasePart(pship, ET_Dispenser, 0, ptDesired);
-        ErasePart(pship, ET_ChaffLauncher, 0, ptDesired);
-        for (Mount i = 0; (i < c_maxCargo); i++)
-            ErasePart(pship, NA, -1 - i, ptDesired);
-    }
-
-    {
-        IpartTypeIGC*   ptFuel = (pship->GetMountedPart(ET_Afterburner, 0) != NULL)
-                                 ? pMission->GetFuelPack()
-                                 : NULL;
-
-        IpartTypeIGC*   ptAmmo = NULL;
+        //Go through and fill any holes with the desired parts
         {
-            for (Mount i = pship->GetHullType()->GetMaxWeapons() - 1; (i >= 0); i--)
-            {
-                IweaponIGC* pw = (IweaponIGC*)(pship->GetMountedPart(ET_Weapon, i));
-                if (pw && (pw->GetAmmoPerShot() != 0))
-                {
-                    ptAmmo = pMission->GetAmmoPack();
-                    break;
-                }
-            }
+            ErasePart(pship, ET_Magazine, 0, ptDesired);
+            ErasePart(pship, ET_Dispenser, 0, ptDesired);
+            ErasePart(pship, ET_ChaffLauncher, 0, ptDesired);
+            for (Mount i = 0; (i < c_maxCargo); i++)
+                ErasePart(pship, NA, -1 - i, ptDesired);
         }
 
-        bool    bBuyFuel = true;
-
-        // Remount launcher parts if they are depleted AaronMoore 1/10 (Imago)
-        for (int i = 0; i < 3; i++)
         {
-            if ((i == 0 && pship->GetMountedPart(ET_Magazine, 0) == NULL) ||
-                (i == 1 && pship->GetMountedPart(ET_Dispenser, 0) == NULL) ||
-                (i == 2 && pship->GetMountedPart(ET_ChaffLauncher, 0) == NULL))
+            IpartTypeIGC*   ptFuel = (pship->GetMountedPart(ET_Afterburner, 0) != NULL)
+                ? pMission->GetFuelPack()
+                : NULL;
+
+            IpartTypeIGC*   ptAmmo = NULL;
             {
-                IpartTypeIGC*   pt = ptDesired[i];
- 
-                if (pt)
+                for (Mount i = pship->GetHullType()->GetMaxWeapons() - 1; (i >= 0); i--)
                 {
-                    // Upgrade part if posible
-                    while (true)
+                    IweaponIGC* pw = (IweaponIGC*)(pship->GetMountedPart(ET_Weapon, i));
+                    if (pw && (pw->GetAmmoPerShot() != 0))
                     {
-                        IpartTypeIGC*   ptNext = pt->GetSuccessorPartType();
-                        if (ptNext && (ptNext->GetRequiredTechs() <= ttbm))
-                            pt = ptNext;
-                        else
-                            break;
+                        ptAmmo = pMission->GetAmmoPack();
+                        break;
                     }
-                    pship->CreateAndAddPart(pt, 0, SHRT_MAX);
-
-                    // Remove this part from the desired list so it is not added again into cargo
-                    ptDesired[i] = NULL;
                 }
             }
-        }
-		//end AaaronMoore 1/10
-        
 
-        int     iDesired = 0;
-        for (Mount i = 0; (i < c_maxCargo); i++)
-        {
-            IpartIGC*   ppart = pship->GetMountedPart(NA, -1 - i);
-            if (ppart == NULL)
+            bool    bBuyFuel = true;
+
+            // Remount launcher parts if they are depleted AaronMoore 1/10 (Imago)
+            for (int i = 0; i < 3; i++)
             {
-                //Shove an instance of the first part left in the
-                //desired part list into the slot
-                while (iDesired < c_maxCargo + 3)
+                if ((i == 0 && pship->GetMountedPart(ET_Magazine, 0) == NULL) ||
+                    (i == 1 && pship->GetMountedPart(ET_Dispenser, 0) == NULL) ||
+                    (i == 2 && pship->GetMountedPart(ET_ChaffLauncher, 0) == NULL))
                 {
-                    IpartTypeIGC*   pt = ptDesired[iDesired++];
+                    IpartTypeIGC*   pt = ptDesired[i];
 
-                    if (pt && (pt->GetRequiredTechs() <= ttbm))
+                    if (pt)
                     {
+                        // Upgrade part if posible
                         while (true)
                         {
                             IpartTypeIGC*   ptNext = pt->GetSuccessorPartType();
@@ -12858,24 +12903,57 @@ bool FedSrvSiteBase::LandOnCarrierEvent(IshipIGC* pshipCarrier, IshipIGC* pship,
                             else
                                 break;
                         }
+                        pship->CreateAndAddPart(pt, 0, SHRT_MAX);
 
-                        ppart = pship->CreateAndAddPart(pt, -1 - i, SHRT_MAX);
-                        assert (ppart->GetPrice() == 0);
-                        break;
+                        // Remove this part from the desired list so it is not added again into cargo
+                        ptDesired[i] = NULL;
                     }
                 }
+            }
+            //end AaaronMoore 1/10
 
+
+            int     iDesired = 0;
+            for (Mount i = 0; (i < c_maxCargo); i++)
+            {
+                IpartIGC*   ppart = pship->GetMountedPart(NA, -1 - i);
                 if (ppart == NULL)
                 {
-                    if (bBuyFuel && ptFuel)
+                    //Shove an instance of the first part left in the
+                    //desired part list into the slot
+                    while (iDesired < c_maxCargo + 3)
                     {
-                        pship->CreateAndAddPart(ptFuel, -1 - i, SHRT_MAX);
-                        bBuyFuel = (ptAmmo == NULL);
+                        IpartTypeIGC*   pt = ptDesired[iDesired++];
+
+                        if (pt && (pt->GetRequiredTechs() <= ttbm))
+                        {
+                            while (true)
+                            {
+                                IpartTypeIGC*   ptNext = pt->GetSuccessorPartType();
+                                if (ptNext && (ptNext->GetRequiredTechs() <= ttbm))
+                                    pt = ptNext;
+                                else
+                                    break;
+                            }
+
+                            ppart = pship->CreateAndAddPart(pt, -1 - i, SHRT_MAX);
+                            assert(ppart->GetPrice() == 0);
+                            break;
+                        }
                     }
-                    else if (ptAmmo)
+
+                    if (ppart == NULL)
                     {
-                        pship->CreateAndAddPart(ptAmmo, -1 - i, SHRT_MAX);
-                        bBuyFuel = true;
+                        if (bBuyFuel && ptFuel)
+                        {
+                            pship->CreateAndAddPart(ptFuel, -1 - i, SHRT_MAX);
+                            bBuyFuel = (ptAmmo == NULL);
+                        }
+                        else if (ptAmmo)
+                        {
+                            pship->CreateAndAddPart(ptAmmo, -1 - i, SHRT_MAX);
+                            bBuyFuel = true;
+                        }
                     }
                 }
             }
@@ -12950,8 +13028,19 @@ bool FedSrvSiteBase::LandOnCarrierEvent(IshipIGC* pshipCarrier, IshipIGC* pship,
         pfmLaunch->position = position;
         pfmLaunch->velocity = velocity;
         pfmLaunch->orientation.Set(*porientation);
-        pfmLaunch->cookie = pfsPlayer->NewCookie();
+        if (pfsShip->IsPlayer())
+            pfmLaunch->cookie = pfsShip->GetPlayer()->NewCookie();
         g.fm.SendMessages(GetGroupSectorFlying(pship->GetCluster()), FM_GUARANTEED, FM_FLUSH);
+    }
+
+    if (pship->GetAutopilot()) {
+        if (pship->GetCommandTarget(c_cmdAccepted) == (ImodelIGC*)pshipCarrier && pship->GetCommandID(c_cmdAccepted) == c_cidGoto) {
+            pship->SetCommand(c_cmdAccepted, pshipCarrier, c_cidDefend);
+            if (pship->GetPilotType() >= c_ptPlayer)
+                pship->SetCommand(c_cmdPlan, pshipCarrier, c_cidDefend);
+        }
+        else
+            pship->SetCommand(c_cmdPlan, NULL, c_cidNone); // drones will do c_cmdAccepted
     }
 
     return true;
